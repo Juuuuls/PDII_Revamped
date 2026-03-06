@@ -36,25 +36,27 @@ const unsigned long TARGET_TOTAL_MS = 300000UL; // 5 minutes
 #define US_MAX_CM    600
 
 // ---------- CALIBRATION ----------
-#define UTV_OFFSET_CM (-8)    // subtract 8 cm from distance ultrasonic outputs
+// Set to 0 so Arduino sends the raw ultrasonic distance without subtracting 8 cm
+#define UTV_OFFSET_CM 0
 #define CEILING_OFFSET_CM 100
 #define APPLY_CEILING_OFFSET 0
 
-// ---------- FIXED INTERNAL STOP TIMELINE (STABILITY) ----------
-// After ultrasonic, wait for ringing / motor vibration to die before audio.
+// ---------- FIXED INTERNAL STOP TIMELINE ----------
 #define AUDIO_SETTLE_MS 120
 
 // ---------- AUDIO WINDOWS ----------
-// Keep this at 1000 so rt60 stays in 0.000 to 1.000 seconds,
-// which matches your thresholds:
-// deadspot < 0.3, neutral 0.3-0.4, hotspot > 0.4
+// Keep this at 1000 so rt60 stays in 0.000 to 1.000 seconds
 #define RT60_WINDOW_MS 1000
-#define DB_RMS_SAMPLES 320     // fixed N for consistent measurement time
+#define DB_RMS_SAMPLES 320
 
-// ---------- MIC SENSITIVITY (SOFTWARE) ----------
+// ---------- MIC SETTINGS ----------
 #define MIC_CENTER      512
 #define MIC_SOFT_GAIN   4.5f
 #define MIC_NOISE_FLOOR 2.0f
+
+// ---------- PEAK SENSITIVITY ----------
+// Higher = less sensitive to tiny noise changes
+#define PEAK_MARGIN 1 //5 default, 8 is safer for noisy environments
 
 // ---------- SETUP ----------
 void setup() {
@@ -81,7 +83,7 @@ static long clampCm(long cm) {
   return cm;
 }
 
-// Median-of-N ultrasonic read (raw, no offset)
+// ---------- ULTRASONIC MEDIAN ----------
 long readUltrasonicMedianRawCm(Ultrasonic& u) {
   int vals[US_SAMPLES];
 
@@ -95,10 +97,7 @@ long readUltrasonicMedianRawCm(Ultrasonic& u) {
   return (long)vals[US_SAMPLES / 2];
 }
 
-// ---------- RT60 (RAW PEAK TIME, THRESHOLD-SAFE) ----------
-// No averaging, no smoothing, no filtering.
-// Just returns the exact time (in seconds) when the highest raw analog value happened
-// within a 1000 ms window, so output stays from 0.000 to 1.000.
+// ---------- RT60 (RAW PEAK TIME, LESS SENSITIVE) ----------
 float estimateRT60_peakTimeSeconds(int loudnessPin) {
   unsigned long startTime = millis();
   int peakVal = -1;
@@ -108,7 +107,7 @@ float estimateRT60_peakTimeSeconds(int loudnessPin) {
     int raw = analogRead(loudnessPin);
     unsigned long elapsed = millis() - startTime;
 
-    if (raw > peakVal) {
+    if (raw > peakVal + PEAK_MARGIN) {
       peakVal = raw;
       peakTimeMs = elapsed;
     }
@@ -117,21 +116,29 @@ float estimateRT60_peakTimeSeconds(int loudnessPin) {
   return peakTimeMs / 1000.0f;
 }
 
-// ---------- dB (RMS) ----------
+// ---------- dB (PEAK-TO-PEAK + SOFTER CALIBRATION) ----------
 float measureDB_rms() {
-  long sumSq = 0;
+  int minVal = 1023;
+  int maxVal = 0;
 
   for (int i = 0; i < DB_RMS_SAMPLES; i++) {
     int raw = analogRead(MIC_PIN);
-    int x = raw - MIC_CENTER;
-    sumSq += (long)x * (long)x;
+
+    if (raw < minVal) minVal = raw;
+    if (raw > maxVal) maxVal = raw;
   }
 
-  float rms = sqrt((float)sumSq / (float)DB_RMS_SAMPLES);
-  rms *= MIC_SOFT_GAIN;
-  if (rms < MIC_NOISE_FLOOR) rms = MIC_NOISE_FLOOR;
+  float peakToPeak = (float)(maxVal - minVal);
 
-  return 20.0f * log10(rms);
+  if (peakToPeak < 1.0f) peakToPeak = 1.0f;
+
+  // relative level from raw mic swing
+  float dBOut = 20.0f * log10(peakToPeak);
+
+  // tuned so typical room readings stay closer to 50-70 dB
+  float calibratedDB = 0.75f * dBOut + 36.0f;
+
+  return calibratedDB;
 }
 
 // ---------- SINGLE SENSOR REPORT ----------
